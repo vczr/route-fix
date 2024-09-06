@@ -1,90 +1,117 @@
 use std::{env};
-use std::io::ErrorKind;
+use std::io::{ ErrorKind};
 use std::thread::sleep;
 use std::time::Duration;
 use futures::StreamExt;
 use net_route::{Handle, Route, RouteChange};
 use local_ip_address::{list_afinet_netifas};
-
+use log::{info, LevelFilter};
+use log4rs::append::console::ConsoleAppender;
+use log4rs::encode::pattern::PatternEncoder;
+use log4rs::config::{Appender, Config, Logger, Root};
+// use env_logger::Env;
 
 #[tokio::main]
 async fn main() {
-    println!("开始执行路由修复, 请用wifi连接互联网，网线连接办公网。 支持以下参数: \n指定网络出口 --interface=en0 默认值en0 \n指定出口网关 --gateway=192.168.124.1");
+    // env_logger::builder().filter_level(LevelFilter::Info).init();
+    init_log();
+
+
+    info!("开始执行路由修复, 请用wifi连接互联网，网线连接办公网。 支持以下参数: \n指定网络出口 --interface=en0 默认值en0 \n指定出口网关 --gateway=192.168.124.1");
     let command_line_args = read_args();
-    println!("===================================================");
-    println!("设定互联网出口:{}", command_line_args.interface);
+    info!("===================================================");
+    info!("设定互联网出口:{}", command_line_args.interface);
     let route_info = read_local_ip_addr(&command_line_args.interface).unwrap();
-    println!("当前wifi的ip是{}", route_info.ip);
+    info!("当前wifi的ip是{}", route_info.ip);
     let gateway = {
         if command_line_args.gateway == "" {
-            println!("网关采用默认值{}", route_info.gateway);
+            info!("网关采用默认值{}", route_info.gateway);
             route_info.gateway
         } else {
-            println!("网关采用设置值{}", command_line_args.gateway);
+            info!("网关采用设置值{}", command_line_args.gateway);
             command_line_args.gateway
         }
     };
-    println!("===================================================");
+    info!("===================================================");
     let default_route = Route::new("0.0.0.0".parse().unwrap(), 0)
         .with_ifindex(0)
         .with_gateway(gateway.parse().unwrap());
     let default_route_thread = default_route.clone();
     //新建一个线程定时取查看默认路由还有没有
     tokio::spawn(async move {
-        println!("新建一个线程用来检测默认路由");
+        info!("新建一个线程用来检测默认路由");
         let handle = Handle::new().unwrap();
         loop {
             let default_route_now = handle.default_route().await.unwrap().unwrap();
-            // println!("当前默认路由：{:?}",default_routes);
+            // info!("当前默认路由：{:?}",default_routes);
             if default_route_now.destination.to_string() != "0.0.0.0"
                 || default_route_now.gateway.is_none()
                 || default_route_now.gateway.unwrap().to_string() != default_route.gateway.unwrap().to_string()
             {
-                println!("默认路由被修改，开始修复");
+                info!("默认路由被修改，开始修复");
                 let _ = handle.add(&default_route_thread).await;
             } else {
-                // println!("默认路由正常")
+                // info!("默认路由正常")
             }
             sleep(Duration::from_secs(1));
         }
     });
     loop {
-        println!("开启路由修改事件监听");
+        info!("开启路由修改事件监听");
         let handle = Handle::new().unwrap();
         let listener = handle.route_listen_stream();
         futures::pin_mut!(listener);
         let _ = handle.add(&default_route).await;
+        let mut loop_limit = 0 ;
         while let Some(event) = listener.next().await {
-            match event {
-                RouteChange::Add(_) => {}
-                RouteChange::Delete(_) => {
+            match Some(event) {
+                Some(RouteChange::Add(_)) => {}
+                Some(RouteChange::Delete(_)) => {
                     let add_res = handle.add(&default_route).await;
                     match add_res {
                         Ok(_) => {
-                            println!("修复完成了");
+                            info!("修复完成了。{}",loop_limit);
+                            loop_limit = loop_limit + 1;
                         }
                         Err(e) => {
                             match e.kind() {
                                 ErrorKind::PermissionDenied => {
-                                    println!("没有权限");
+                                    info!("没有权限");
                                 }
-                                ErrorKind::AlreadyExists =>{
+                                ErrorKind::AlreadyExists => {
                                     //特意不处理
                                 }
                                 _ => {
-                                    println!("添加失败，原因{}",e.kind());
+                                    info!("添加失败，原因{}", e.kind());
                                 }
                             }
                         }
                     }
                 }
-                RouteChange::Change(_) => {}
+                Some(RouteChange::Change(_)) => {}
+                None => {
+                    info!("Received None event");
+                    break; // 退出循环
+                }
             };
-            // println!("===================================================");
+            // info!("===================================================");
+            if loop_limit > command_line_args.loop_times {
+                break;
+            }
         }
-        println!("意外结束");
+        info!("下一次循环");
     }
 
+
+}
+
+fn init_log() {
+    let stdout = ConsoleAppender::builder().build();
+    let config = Config::builder()
+        .appender(Appender::builder().build("stdout", Box::new(stdout)))
+        .build(Root::builder().appender("stdout").build(LevelFilter::Debug))
+        .unwrap();
+    log4rs::init_config(config).unwrap();
 
 }
 
@@ -97,7 +124,7 @@ fn read_local_ip_addr(interface: &str) -> Option<RouteInfo> {
     for x in ips {
         //只要IPv4
         if x.1.is_ipv4() && x.0 == interface {
-            // println!("{} {}", x.0, x.1)
+            // info!("{} {}", x.0, x.1)
             route_info.ip = x.1.to_string();
             route_info.gateway = ip_to_gateway(&route_info.ip);
             return Option::from(route_info);
@@ -126,6 +153,7 @@ fn read_args() -> CommandLineArgs {
     let mut arg = CommandLineArgs {
         gateway: "".to_string(),
         interface: "en0".to_string(),
+        loop_times: 200,
     };
     for x in env::args() {
         let t = read_args_from_str(&x);
@@ -136,6 +164,8 @@ fn read_args() -> CommandLineArgs {
                     arg.gateway = t.value;
                 } else if t.key == "interface" {
                     arg.interface = t.value;
+                } else if t.key == "loop_times" {
+                    arg.loop_times = t.value.parse().unwrap();
                 }
             }
         }
@@ -173,6 +203,7 @@ struct RouteInfo {
 struct CommandLineArgs {
     gateway: String,
     interface: String,
+    loop_times:i32
 }
 
 struct KValue {
