@@ -5,23 +5,29 @@ use std::time::Duration;
 use futures::StreamExt;
 use net_route::{Handle, Route, RouteChange};
 use local_ip_address::{list_afinet_netifas};
-use log::{info, LevelFilter};
+use log::{error, info, LevelFilter};
 use log4rs::append::console::ConsoleAppender;
-use log4rs::encode::pattern::PatternEncoder;
-use log4rs::config::{Appender, Config, Logger, Root};
+use log4rs::config::{Appender, Config, Root};
+use std::fs;
+use std::path::Path;
 // use env_logger::Env;
 
 #[tokio::main]
 async fn main() {
     // env_logger::builder().filter_level(LevelFilter::Info).init();
     init_log();
-
-
     info!("开始执行路由修复, 请用wifi连接互联网，网线连接办公网。 支持以下参数: \n指定网络出口 --interface=en0 默认值en0 \n指定出口网关 --gateway=192.168.124.1");
     let command_line_args = read_args();
     info!("===================================================");
     info!("设定互联网出口:{}", command_line_args.interface);
-    let route_info = read_local_ip_addr(&command_line_args.interface).unwrap();
+    let route_info_option = read_local_ip_addr(&command_line_args.interface);
+    match route_info_option {
+        None => {
+            panic!("接口{}找不到网络链接",command_line_args.interface)
+        }
+        _ => {}
+    }
+    let route_info = route_info_option.unwrap();
     info!("当前wifi的ip是{}", route_info.ip);
     let gateway = {
         if command_line_args.gateway == "" {
@@ -38,7 +44,7 @@ async fn main() {
         .with_gateway(gateway.parse().unwrap());
     let default_route_thread = default_route.clone();
     //新建一个线程定时取查看默认路由还有没有
-    tokio::spawn(async move {
+    let default_role_watcher_handle = tokio::spawn(async move {
         info!("新建一个线程用来检测默认路由");
         let handle = Handle::new().unwrap();
         loop {
@@ -54,6 +60,12 @@ async fn main() {
                 // info!("默认路由正常")
             }
             sleep(Duration::from_secs(1));
+        }
+    });
+    let del_handler = tokio::spawn(async {
+        loop {
+            delete_log_files();
+            sleep(Duration::from_secs(60));
         }
     });
     loop {
@@ -209,5 +221,29 @@ struct CommandLineArgs {
 struct KValue {
     key: String,
     value: String,
+}
+
+
+
+fn delete_log_files() {
+    info!("删除vpn日志");
+    let log_dir = Path::new("/Applications/F8iCloud/F8iCloudApp.app/Contents/Resources/log");
+    
+    if let Ok(entries) = fs::read_dir(log_dir) {
+        for entry in entries {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("log") {
+                    if let Err(e) = fs::remove_file(&path) {
+                        info!("Failed to delete log file {:?}: {}", path, e);
+                    } else {
+                        info!("Deleted log file: {:?}", path);
+                    }
+                }
+            }
+        }
+    } else {
+        info!("Failed to read log directory");
+    }
 }
 
