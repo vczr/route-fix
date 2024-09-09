@@ -44,7 +44,7 @@ async fn main() {
         .with_gateway(gateway.parse().unwrap());
     let default_route_thread = default_route.clone();
     //新建一个线程定时取查看默认路由还有没有
-    let default_role_watcher_handle = tokio::spawn(async move {
+    let _ = tokio::spawn(async move {
         info!("新建一个线程用来检测默认路由");
         let handle = Handle::new().unwrap();
         loop {
@@ -62,7 +62,7 @@ async fn main() {
             sleep(Duration::from_secs(1));
         }
     });
-    let del_handler = tokio::spawn(async {
+    let _ = tokio::spawn(async {
         loop {
             delete_log_files();
             sleep(Duration::from_secs(60));
@@ -227,7 +227,7 @@ struct KValue {
 
 fn delete_log_files() {
     info!("删除vpn日志");
-    let log_dir = Path::new("/Applications/F8iCloud/F8iCloudApp.app/Contents/Resources/log");
+    let log_dir = Path::new("");
     
     if let Ok(entries) = fs::read_dir(log_dir) {
         for entry in entries {
