@@ -10,6 +10,8 @@ use log4rs::append::console::ConsoleAppender;
 use log4rs::config::{Appender, Config, Root};
 use std::fs;
 use std::path::Path;
+use tokio::time::error::Elapsed;
+use tokio::time::timeout;
 // use env_logger::Env;
 
 #[tokio::main]
@@ -20,6 +22,7 @@ async fn main() {
     let command_line_args = read_args();
     info!("===================================================");
     info!("设定互联网出口:{}", command_line_args.interface);
+    info!("设定循环超时时间{}s",command_line_args.loop_times);
     let route_info_option = read_local_ip_addr(&command_line_args.interface);
     match route_info_option {
         None => {
@@ -69,49 +72,60 @@ async fn main() {
         }
     });
     loop {
-        info!("开启路由修改事件监听");
-        let handle = Handle::new().unwrap();
-        let listener = handle.route_listen_stream();
-        futures::pin_mut!(listener);
-        let _ = handle.add(&default_route).await;
-        let mut loop_limit = 0 ;
-        while let Some(event) = listener.next().await {
-            match Some(event) {
-                Some(RouteChange::Add(_)) => {}
-                Some(RouteChange::Delete(_)) => {
-                    let add_res = handle.add(&default_route).await;
-                    match add_res {
-                        Ok(_) => {
-                            info!("修复完成了。{}",loop_limit);
-                            loop_limit = loop_limit + 1;
-                        }
-                        Err(e) => {
-                            match e.kind() {
-                                ErrorKind::PermissionDenied => {
-                                    info!("没有权限");
+        let result = timeout(Duration::from_secs(command_line_args.loop_times as u64), async {
+            {
+                info!("开启路由修改事件监听");
+                let handle = Handle::new().unwrap();
+                let listener = handle.route_listen_stream();
+                futures::pin_mut!(listener);
+                let _ = handle.add(&default_route).await;
+                let mut loop_limit = 0;
+                while let Some(event) = listener.next().await {
+                    match Some(event) {
+                        Some(RouteChange::Add(_)) => {}
+                        Some(RouteChange::Delete(_)) => {
+                            let add_res = handle.add(&default_route).await;
+                            match add_res {
+                                Ok(_) => {
+                                    info!("修复完成了。{}",loop_limit);
+                                    loop_limit = loop_limit + 1;
                                 }
-                                ErrorKind::AlreadyExists => {
-                                    //特意不处理
-                                }
-                                _ => {
-                                    info!("添加失败，原因{}", e.kind());
+                                Err(e) => {
+                                    match e.kind() {
+                                        ErrorKind::PermissionDenied => {
+                                            info!("没有权限");
+                                        }
+                                        ErrorKind::AlreadyExists => {
+                                            //特意不处理
+                                        }
+                                        _ => {
+                                            info!("添加失败，原因{}", e.kind());
+                                        }
+                                    }
                                 }
                             }
                         }
+                        Some(RouteChange::Change(_)) => {}
+                        None => {
+                            info!("Received None event");
+                            break; // 退出循环
+                        }
+                    };
+                    // info!("===================================================");
+                    if loop_limit > command_line_args.loop_times {
+                        break;
                     }
                 }
-                Some(RouteChange::Change(_)) => {}
-                None => {
-                    info!("Received None event");
-                    break; // 退出循环
-                }
-            };
-            // info!("===================================================");
-            if loop_limit > command_line_args.loop_times {
-                break;
+                info!("下一次循环");
+            }
+        }).await;
+        match result {
+            Ok(_) => {}
+            Err(_) => {
+                info!("超时开启下周期");
             }
         }
-        info!("下一次循环");
+
     }
 
 
@@ -246,4 +260,3 @@ fn delete_log_files() {
         info!("Failed to read log directory");
     }
 }
-
